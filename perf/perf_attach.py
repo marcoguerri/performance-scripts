@@ -50,21 +50,42 @@ def cmdline():
     options = parser.parse_args()[0]
     return options, parser
 
+def detect_pid(process_name):
+    pid = -1
+    for _pid in psutil.pids():
+        try:
+            p = psutil.Process(_pid)
+            if p.name() == process_name:
+                pid = _pid
+        except Exception, e:
+            pass
+    return pid
 
 class PerfStrategy:
-    def __init__(self, pid, begin, end):
+    def __init__(self, pid, begin, end, process_name):
         self.pid = pid
         # Begin and end patterns
         self.begin = begin
         self.end = end
-        self.p = None
+        self.process_name = process_name
+        self.subprocess = None
         self.sentinel = None
 
     def parse(self, line, *args):
         regex_pattern = re.compile(self.begin)
         group = re.search(regex_pattern, line)
-        if group != None and self.p == None:
-            sys.stderr.write("Starting perf on pid {}\n".format(self.pid))
+
+        # If pid == -1, try to detect it as soon as possible, before hitting
+        # the begin pattern
+        if self.pid == -1:
+            self.pid = detect_pid(self.process_name)
+
+        if group != None and self.subprocess == None:
+            if(self.pid == -1):
+                sys.stderr.write("ParsingStrategy: begin pattern was found but pid is still now known, exiting\n")
+                sys.exit(1)
+
+            sys.stderr.write("ParsingStrategy: starting perf on pid {}\n".format(self.pid))
             # Executing perf and waiting for end pattern.
             # When attaching perf to a process, the sampling time is determined
             # by the command passed to perf. In the first version strace was i
@@ -72,26 +93,26 @@ class PerfStrategy:
             # exit_group). This would monitor up to the end of the run. Now 
             # helper command is simply a sleep which is killed upon encountering 
             # end pattern
-            self.p = subprocess.Popen(["/usr/bin/perf", "record", 
+            self.subprocess = subprocess.Popen(["/usr/bin/perf", "record", 
                                        "-e cycles:pp", "-p", str(self.pid),
                                        "sleep", "infinity"],
                                        stderr = subprocess.PIPE)
 
         regex_pattern = re.compile(self.end)
         group = re.search(regex_pattern, line)
-        if group != None and self.p != None:
+        if group != None and self.subprocess != None:
             sys.stderr.write("Terminating perf on pid {}\n".format(self.pid))
             # Searching for perf children. There should be only one, i.e. "sleep infinity"
-            perf_process = psutil.Process(self.p.pid)
+            perf_process = psutil.Process(self.subprocess.pid)
             if(len(perf_process.children(recursive = False)) > 1):
                 sys.stderr.write("perf has more than one children, don't know which one to kill")
                 sys.exit(1)
             else:
                 os.kill(perf_process.children(recursive = False)[0].pid, signal.SIGTERM)
 
-            stdout, stderr = self.p.communicate()
+            stdout, stderr = self.subprocess.communicate()
             sys.stdout.write(str(stderr))
-            self.p = None
+            self.subprocess = None
             sys.exit(0)
 
 class PerfEventHandler(pyinotify.ProcessEvent):
@@ -121,9 +142,11 @@ class PerfEventHandler(pyinotify.ProcessEvent):
 
     def process_IN_OPEN(self, event):
         global wd_dict
+        
         # Note: if IN_OPEN takes too much time to execute, other events might get lost
         if event.pathname[-len(self.file_name):] == self.file_name:
             sys.stderr.write("IN_OPEN: {}\n".format(event.pathname))
+
             # If process name is not set, profile the application that 
             # is writing on the log file
             pid = -1
@@ -138,26 +161,17 @@ class PerfEventHandler(pyinotify.ProcessEvent):
                             break
                     except:
                         pass
-            else:
-                attempts = 3
-                while(pid == -1 and attempts != 0):
-                    for _pid in psutil.pids():
-                        try:
-                            p = psutil.Process(_pid)
-                            if p.name() == self.process_name:
-                                pid = _pid
-                        except Exception, e:
-                            pass
-                    attempts-=1
-                    time.sleep(1)
-            if pid == -1:
-                sys.stderr.write("Could not find process to attach to\n")
-                sys.exit(1)
 
             if(self.perf_strategy == None):
-                self.perf_strategy = PerfStrategy(pid, self.begin, self.end)
-                sys.stderr.write("Registered a perf strategy for pid {}\n".format(pid))
-
+                if(pid == -1):
+                    sys.stderr.write("IN_OPEN: pid to attach to is not known at this stage\n")
+                else:
+                    sys.stderr.write("Process pid is {}".format(pid))
+                
+                self.perf_strategy = PerfStrategy(pid, self.begin, self.end, self.process_name)
+                sys.stderr.write("IN_OPEN: Registered a perf strategy on file\n".format(event.pathname))
+            
+            # Removing all watches, now considering only event.pathname        
             for watch_path in wd_dict.keys():
                 try:
                     watch_manager.rm_watch(wd_dict[watch_path], rec = True)
@@ -200,20 +214,19 @@ def main():
 
     global wd_dict
     options, parser = cmdline()
-    try:
-        if(options.path == None):
-            raise ValueError("path was not specified") 
-        if(options.file_name == None):
-            raise ValueError("file name was not specified")
-        if(options.begin == None):
-            raise ValueError("begin pattern was not specified")
-        if(options.end == None):
-            raise ValueError("end pattern was not specified")
-    except Exception, e:
-        sys.stderr.write("Error: {}\n".format(str(e)))
-        parser.print_help()
+    if(options.path == None):
+        sys.stderr.write("Path was not specified\n")
         sys.exit(1)
-         
+    if(options.file_name == None):
+        sys.stderr.write("File name was not specified\n")
+        sys.exit(1)
+    if(options.begin == None):
+        sys.stderr.write("Begin pattern not set\n")
+        sys.exit(1)
+    if(options.end == None):
+        sys.stderr.write("End pattern not set\n")
+        sys.exit(1)
+    
     path = options.path
     wd_dict = watch_manager.add_watch(path, pyinotify.IN_CREATE | pyinotify.IN_OPEN, rec=True)
     if wd_dict[path] > 0 :

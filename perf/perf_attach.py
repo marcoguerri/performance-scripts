@@ -5,6 +5,7 @@ import re
 import os
 import time
 import signal
+import logging
 import psutil
 from optparse import OptionParser
 
@@ -18,6 +19,8 @@ wd_dict = dict()
 # End: done processing event #72
 # Process name: athena.py
 #
+
+logging.getLogger().setLevel(logging.ERROR)
 
 def cmdline():
     parser = OptionParser()
@@ -166,17 +169,12 @@ class PerfEventHandler(pyinotify.ProcessEvent):
                 if(pid == -1):
                     sys.stderr.write("IN_OPEN: pid to attach to is not known at this stage\n")
                 else:
-                    sys.stderr.write("Process pid is {}".format(pid))
+                    sys.stderr.write("IN_OPEN: process pid is {}".format(pid))
                 
                 self.perf_strategy = PerfStrategy(pid, self.begin, self.end, self.process_name)
-                sys.stderr.write("IN_OPEN: Registered a perf strategy on file\n".format(event.pathname))
             
             # Removing all watches, now considering only event.pathname        
-            for watch_path in wd_dict.keys():
-                try:
-                    watch_manager.rm_watch(wd_dict[watch_path], rec = True)
-                except Exception, e:
-                    pass
+            watch_manager.rm_watch(wd_dict.values())
 
             # Adding a watch directly for the file but only for the following 
             # events (this is what tail -f does)
@@ -190,16 +188,15 @@ class PerfEventHandler(pyinotify.ProcessEvent):
                                               rec=True)
             if(wd_temp[event.pathname] > 0):
                 wd_dict = dict(wd_dict.items() + wd_temp.items())
-                sys.stderr.write("IN_MODIFY watch created for {}\n".format(event.pathname))
+                sys.stderr.write("IN_OPEN: IN_MODIFY watch created for {}\n".format(event.pathname))
             else:
-                sys.stderr.write("Could not add modify watch for file {}\n", event.pathname)
+                sys.stderr.write("IN_OPEN: could not add modify watch for file {}\n", event.pathname)
 
-            # Opening the file to have file descriptor available during
-            # IN_MODIFY callback
+            # Opening file to have file descriptor available during IN_MODIFY callback
             try:
                 self.fd = open(event.pathname, "r")
             except IOError, e:
-                sys.stderr.write("Could not open {} for reading: {}".format(event.pathname, e))
+                sys.stderr.write("IN_OPEN: could not open {} for reading: {}".format(event.pathname, e))
                 sys.exit(1)
 
     def process_IN_MODIFY(self, event):
